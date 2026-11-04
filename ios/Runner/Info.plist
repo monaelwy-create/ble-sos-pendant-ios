@@ -29,10 +29,6 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
@@ -72,5 +68,11 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+		<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app needs Bluetooth to detect the SOS pendant.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
 </dict>
 </plist>
