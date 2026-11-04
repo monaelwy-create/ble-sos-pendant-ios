@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:geolocator/geolocator.dart'; // <-- Import Geolocator
 
 void main() => runApp(const MaterialApp(home: BleScanPage()));
 
@@ -24,7 +25,6 @@ class _BleScanPageState extends State<BleScanPage> {
     });
   }
 
-  // FIX 1: Cancel the listener when the app is closed to prevent memory leaks
   @override
   void dispose() {
     _sosSubscription?.cancel();
@@ -36,14 +36,43 @@ class _BleScanPageState extends State<BleScanPage> {
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
   }
 
+  // --- NEW FUNCTION: Get Location ---
+  Future<Position?> _getLocation() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    // 1. Check if location services are enabled on the phone
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      debugPrint('Location services are disabled.');
+      return null;
+    }
+
+    // 2. Check permissions
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        debugPrint('Location permissions are denied');
+        return null;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      debugPrint('Location permissions are permanently denied.');
+      return null;
+    }
+
+    // 3. Get the position
+    return await Geolocator.getCurrentPosition();
+  }
+
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await FlutterBluePlus.stopScan();
       await device.connect();
 
       setState(() => _isConnected = true);
-
-      // FIX 2: Check if the screen is still open before using context
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -60,10 +89,14 @@ class _BleScanPageState extends State<BleScanPage> {
                 "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
               await characteristic.setNotifyValue(true);
 
-              _sosSubscription = characteristic.onValueReceived.listen((value) {
+              _sosSubscription = characteristic.onValueReceived.listen((
+                value,
+              ) async {
+                // <-- Added async
                 String message = String.fromCharCodes(value);
                 if (message == "SOS") {
-                  _showSosDialog();
+                  // Trigger location fetch
+                  await _handleEmergency();
                 }
               });
             }
@@ -75,13 +108,48 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
-  void _showSosDialog() {
+  // --- NEW FUNCTION: Handle Emergency ---
+  Future<void> _handleEmergency() async {
+    if (!mounted) return;
+
+    // Show a loading dialog while getting GPS
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text("Getting location..."),
+          ],
+        ),
+      ),
+    );
+
+    Position? position = await _getLocation();
+
+    if (!mounted) return;
+    Navigator.pop(context); // Close loading dialog
+
+    if (position != null) {
+      _showSosDialog(position.latitude, position.longitude);
+    } else {
+      _showSosDialog(null, null); // Show dialog even if GPS fails
+    }
+  }
+
+  void _showSosDialog(double? lat, double? lng) {
+    String locationText = (lat != null && lng != null)
+        ? 'Lat: $lat\nLng: $lng'
+        : 'Could not get GPS location.';
+
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('🚨 EMERGENCY'),
-        content: const Text(
-          'The SOS button was pressed! Here is where we will trigger Firebase.',
+        content: Text(
+          'SOS Button Pressed!\n\n$locationText\n\n(Next step: send this to Firebase)',
         ),
         actions: [
           TextButton(
