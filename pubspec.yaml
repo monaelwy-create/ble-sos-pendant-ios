@@ -36,6 +36,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_blue_plus: ^1.35.0
   geolocator: ^14.1.2
+  cloud_firestore: ^7.1.0
+  firebase_core: ^5.1.0
 
 dev_dependencies:
   flutter_test:

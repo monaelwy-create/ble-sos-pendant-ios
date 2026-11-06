@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "758267457393",
+    "project_id": "ios-sos-d7d90",
+    "storage_bucket": "ios-sos-d7d90.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:758267457393:android:ee51128ed3fc63864810d0",
+        "android_client_info": {
+          "package_name": "com.example.ble_sos_pendant"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDSHyZmm2ZZVAbdUvMROeKJ9qn9oaUyDRk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -2,9 +2,17 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:geolocator/geolocator.dart'; // <-- Import Geolocator
+import 'package:geolocator/geolocator.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // <-- Added Firestore
 
-void main() => runApp(const MaterialApp(home: BleScanPage()));
+import 'firebase_options.dart'; // <-- Added Firebase Options
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  runApp(const MaterialApp(home: BleScanPage()));
+}
 
 class BleScanPage extends StatefulWidget {
   const BleScanPage({super.key});
@@ -36,34 +44,20 @@ class _BleScanPageState extends State<BleScanPage> {
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
   }
 
-  // --- NEW FUNCTION: Get Location ---
   Future<Position?> _getLocation() async {
     bool serviceEnabled;
     LocationPermission permission;
 
-    // 1. Check if location services are enabled on the phone
     serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      debugPrint('Location services are disabled.');
-      return null;
-    }
+    if (!serviceEnabled) return null;
 
-    // 2. Check permissions
     permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) {
-        debugPrint('Location permissions are denied');
-        return null;
-      }
+      if (permission == LocationPermission.denied) return null;
     }
+    if (permission == LocationPermission.deniedForever) return null;
 
-    if (permission == LocationPermission.deniedForever) {
-      debugPrint('Location permissions are permanently denied.');
-      return null;
-    }
-
-    // 3. Get the position
     return await Geolocator.getCurrentPosition();
   }
 
@@ -92,10 +86,8 @@ class _BleScanPageState extends State<BleScanPage> {
               _sosSubscription = characteristic.onValueReceived.listen((
                 value,
               ) async {
-                // <-- Added async
                 String message = String.fromCharCodes(value);
                 if (message == "SOS") {
-                  // Trigger location fetch
                   await _handleEmergency();
                 }
               });
@@ -108,11 +100,10 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
-  // --- NEW FUNCTION: Handle Emergency ---
   Future<void> _handleEmergency() async {
     if (!mounted) return;
 
-    // Show a loading dialog while getting GPS
+    // 1. Show loading dialog
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -121,21 +112,37 @@ class _BleScanPageState extends State<BleScanPage> {
           children: [
             CircularProgressIndicator(),
             SizedBox(width: 20),
-            Text("Getting location..."),
+            Text("Getting location & sending alert..."),
           ],
         ),
       ),
     );
 
+    // 2. Get GPS
     Position? position = await _getLocation();
 
+    // 3. Send to Firestore
+    try {
+      await FirebaseFirestore.instance.collection('sos_alerts').add({
+        'timestamp': FieldValue.serverTimestamp(),
+        'latitude': position?.latitude ?? 0.0,
+        'longitude': position?.longitude ?? 0.0,
+        'status': 'EMERGENCY',
+        'device': 'SOS_PENDANT',
+      });
+      debugPrint("SOS Alert sent to Firestore!");
+    } catch (e) {
+      debugPrint("Failed to send to Firestore: $e");
+    }
+
+    // 4. Close loading dialog and show success
     if (!mounted) return;
-    Navigator.pop(context); // Close loading dialog
+    Navigator.pop(context);
 
     if (position != null) {
       _showSosDialog(position.latitude, position.longitude);
     } else {
-      _showSosDialog(null, null); // Show dialog even if GPS fails
+      _showSosDialog(null, null);
     }
   }
 
@@ -147,9 +154,9 @@ class _BleScanPageState extends State<BleScanPage> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('🚨 EMERGENCY'),
+        title: const Text('🚨 EMERGENCY SENT'),
         content: Text(
-          'SOS Button Pressed!\n\n$locationText\n\n(Next step: send this to Firebase)',
+          'SOS Button Pressed!\n\n$locationText\n\nAlert sent to caregivers.',
         ),
         actions: [
           TextButton(
