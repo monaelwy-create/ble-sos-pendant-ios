@@ -133,7 +133,7 @@ class _BleScanPageState extends State<BleScanPage> {
           'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'to': '+201122882717',
+        'to': '+201005115395',
         'from': '+16592177994',
         'body': smsBody,
         'timestamp': FieldValue.serverTimestamp(),
