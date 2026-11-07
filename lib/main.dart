@@ -100,6 +100,7 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
+  // =============================================================
   Future<void> _handleEmergency() async {
     if (!mounted) return;
 
@@ -121,16 +122,24 @@ class _BleScanPageState extends State<BleScanPage> {
     // 2. Get GPS
     Position? position = await _getLocation();
 
-    // 3. Send to Firestore
+    // 3. Send to Firestore (Triggering the Twilio Extension)
     try {
+      // Extract coordinates or use 0.0 if GPS failed
+      String lat = position?.latitude.toString() ?? "Unknown";
+      String lng = position?.longitude.toString() ?? "Unknown";
+
+      // Construct the SMS message
+      String smsBody =
+          'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
+
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'timestamp': FieldValue.serverTimestamp(),
-        'latitude': position?.latitude ?? 0.0,
-        'longitude': position?.longitude ?? 0.0,
-        'status': 'EMERGENCY',
-        'device': 'SOS_PENDANT',
+        'to': '+201122882717', // ⚠️ REPLACE WITH THE CAREGIVER'S NUMBER (E.164 format)
+        'from': '+16592177994', // Put YOUR Twilio phone number here
+        'body': smsBody,
+        'timestamp': FieldValue.serverTimestamp(), // Optional, for your records
       });
-      debugPrint("SOS Alert sent to Firestore!");
+
+      debugPrint("SOS Alert triggered Twilio SMS!");
     } catch (e) {
       debugPrint("Failed to send to Firestore: $e");
     }
@@ -139,13 +148,10 @@ class _BleScanPageState extends State<BleScanPage> {
     if (!mounted) return;
     Navigator.pop(context);
 
-    if (position != null) {
-      _showSosDialog(position.latitude, position.longitude);
-    } else {
-      _showSosDialog(null, null);
-    }
+    _showSosDialog(position?.latitude, position?.longitude);
   }
 
+  // ===============================================================
   void _showSosDialog(double? lat, double? lng) {
     String locationText = (lat != null && lng != null)
         ? 'Lat: $lat\nLng: $lng'
