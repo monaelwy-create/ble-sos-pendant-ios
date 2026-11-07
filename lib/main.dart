@@ -133,10 +133,10 @@ class _BleScanPageState extends State<BleScanPage> {
           'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'to': '+201122882717', // ⚠️ REPLACE WITH THE CAREGIVER'S NUMBER (E.164 format)
-        'from': '+16592177994', // Put YOUR Twilio phone number here
+        'to': '+201122882717',
+        'from': '+16592177994',
         'body': smsBody,
-        'timestamp': FieldValue.serverTimestamp(), // Optional, for your records
+        'timestamp': FieldValue.serverTimestamp(),
       });
 
       debugPrint("SOS Alert triggered Twilio SMS!");
