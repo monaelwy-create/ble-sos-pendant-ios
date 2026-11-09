@@ -56,5 +56,8 @@
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
 
+	<key>NSContactsUsageDescription</key>
+    <string>This app needs access to contacts to select the caregiver's phone number.</string>
+
 </dict>
 </plist>

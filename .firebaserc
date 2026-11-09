@@ -1,7 +1,14 @@
 {
   "projects": {
-    "default": "flutter-project-71723"
+    "default": "ios-sos-d7d90"
   },
   "targets": {},
-  "etags": {}
+  "etags": {
+    "ios-sos-d7d90": {
+      "extensionInstances": {
+        "send-message": "c66cf73f7f84a7e22a45110ee902a2863604bb5ce546686c5307eb36c925705d",
+        "send-message-imkf": "300273d64ee1b1c108e6684dfaae9721b036e720efb02626bccf21e18b40f225"
+      }
+    }
+  }
 }

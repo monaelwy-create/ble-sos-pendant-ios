@@ -1,6 +1,8 @@
 Twilio account for ios-sos
 Account SID : ACd8f27bf9935fb2f858b6d486ca28c5da
 
-Auth Token : 4475d2ce3ac1b0e0ecb66552fe9a9a3f
+Auth Token : 
+
+dec955cd035a643a79cd92680ce106af
 
 My Twilio phone number: +16592177994
