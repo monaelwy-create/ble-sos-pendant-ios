@@ -54,24 +54,30 @@ class _BleScanPageState extends State<BleScanPage> {
 
   // ================================================================
   Future<void> _pickContact() async {
-    // 1. Request permission using the new API
-    final status = await FlutterContacts.permissions.request(
-      PermissionType.read,
-    );
-    if (status != PermissionStatus.granted) {
-      debugPrint("Permission denied to read contacts");
-      return;
-    }
+    try {
+      // 1. Request permission
+      final status = await FlutterContacts.permissions.request(
+        PermissionType.read,
+      );
 
-    // 2. Open the native contact picker (new API method)
-    // The showPicker method returns the selected Contact directly
-    final contact = await FlutterContacts.native.showPicker(
-      properties: {ContactProperty.phone}, // We only need the phone number
-    );
+      if (status != PermissionStatus.granted) {
+        debugPrint("Permission denied to read contacts. Status: $status");
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Permission to access contacts was denied.'),
+          ),
+        );
+        return;
+      }
 
-    if (contact != null) {
-      if (contact.phones.isNotEmpty) {
-        // 3. Clean the number and add '+' if missing (E.164 format)
+      // 2. Open the native contact picker
+      final contact = await FlutterContacts.native.showPicker(
+        properties: {ContactProperty.phone},
+      );
+
+      if (contact != null && contact.phones.isNotEmpty) {
+        // 3. Clean the number
         String rawNumber = contact.phones.first.number.replaceAll(
           RegExp(r'[^\d+]'),
           '',
@@ -92,14 +98,10 @@ class _BleScanPageState extends State<BleScanPage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Caregiver saved: $rawNumber')));
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Selected contact has no phone number.'),
-          ),
-        );
       }
+    } catch (e) {
+      // THIS will print the exact error to your debug console if it still fails
+      debugPrint("Error picking contact: $e");
     }
   }
   // ----------------------------
