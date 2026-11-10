@@ -75,18 +75,23 @@ class _BleScanPageState extends State<BleScanPage> {
       final contact = await FlutterContacts.native.showPicker(
         properties: {ContactProperty.phone},
       );
-
+      // **************************
       if (contact != null && contact.phones.isNotEmpty) {
-        // 3. Clean the number
+        // 1. Clean the number (remove spaces, dashes, etc.)
         String rawNumber = contact.phones.first.number.replaceAll(
           RegExp(r'[^\d+]'),
           '',
         );
-        if (!rawNumber.startsWith('+')) {
-          rawNumber = '+$rawNumber';
+
+        // 2. Format for Egypt (if it starts with '0', replace '0' with '+20')
+        if (rawNumber.startsWith('0')) {
+          rawNumber = '+20${rawNumber.substring(1)}';
+        } else if (!rawNumber.startsWith('+')) {
+          // If it's just digits without a 0, and no +, add +20
+          rawNumber = '+20$rawNumber';
         }
 
-        // 4. Save to phone memory
+        // 3. Save to phone memory
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('caregiver_number', rawNumber);
 
