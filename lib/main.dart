@@ -5,8 +5,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_contacts/flutter_contacts.dart'; // <-- New
-import 'package:shared_preferences/shared_preferences.dart'; // <-- New
+import 'package:flutter_contacts/flutter_contacts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_options.dart';
 
@@ -23,126 +23,64 @@ class BleScanPage extends StatefulWidget {
 }
 
 class _BleScanPageState extends State<BleScanPage> {
-  List<ScanResult> _results = [];
+  StreamSubscription<List<ScanResult>>? _scanSubscription;
+  StreamSubscription<dynamic>? _connectionSubscription; // Fixed type
   StreamSubscription<List<int>>? _sosSubscription;
-  bool _isConnected = false;
 
-  String? _caregiverNumber; // Stores the saved number
+  bool _isConnected = false;
+  String? _caregiverNumber;
 
   @override
   void initState() {
     super.initState();
-    FlutterBluePlus.onScanResults.listen((results) {
-      setState(() => _results = results);
-    });
-    _loadCaregiverNumber(); // Load saved number on startup
+    _loadCaregiverNumber();
+    _startAutoScan();
   }
 
   @override
   void dispose() {
+    _scanSubscription?.cancel();
+    _connectionSubscription?.cancel();
     _sosSubscription?.cancel();
     super.dispose();
   }
 
-  // --- CONTACT & SAVE LOGIC ---
-  Future<void> _loadCaregiverNumber() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _caregiverNumber = prefs.getString('caregiver_number');
-    });
-  }
+  // --- AUTO SCAN & AUTO CONNECT LOGIC ---
+  void _startAutoScan() {
+    _scanSubscription?.cancel(); // Cancel any existing scan listener
 
-  // ================================================================
-  Future<void> _pickContact() async {
-    try {
-      // 1. Request permission
-      final status = await FlutterContacts.permissions.request(
-        PermissionType.read,
-      );
-
-      if (status != PermissionStatus.granted) {
-        debugPrint("Permission denied to read contacts. Status: $status");
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Permission to access contacts was denied.'),
-          ),
-        );
-        return;
-      }
-
-      // 2. Open the native contact picker
-      final contact = await FlutterContacts.native.showPicker(
-        properties: {ContactProperty.phone},
-      );
-      // **************************
-      if (contact != null && contact.phones.isNotEmpty) {
-        // 1. Clean the number (remove spaces, dashes, etc.)
-        String rawNumber = contact.phones.first.number.replaceAll(
-          RegExp(r'[^\d+]'),
-          '',
-        );
-
-        // 2. Format for Egypt (if it starts with '0', replace '0' with '+20')
-        if (rawNumber.startsWith('0')) {
-          rawNumber = '+20${rawNumber.substring(1)}';
-        } else if (!rawNumber.startsWith('+')) {
-          // If it's just digits without a 0, and no +, add +20
-          rawNumber = '+20$rawNumber';
+    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+      for (ScanResult r in results) {
+        if (r.advertisementData.advName == "SOS_PENDANT") {
+          debugPrint("Found Pendant! Connecting automatically...");
+          FlutterBluePlus.stopScan();
+          _connectToDevice(r.device);
+          break;
         }
-
-        // 3. Save to phone memory
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('caregiver_number', rawNumber);
-
-        setState(() {
-          _caregiverNumber = rawNumber;
-        });
-
-        if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Caregiver saved: $rawNumber')));
       }
-    } catch (e) {
-      // THIS will print the exact error to your debug console if it still fails
-      debugPrint("Error picking contact: $e");
-    }
-  }
-  // ----------------------------
+    });
 
-  Future<void> _startScan() async {
-    if (await FlutterBluePlus.isSupported == false) return;
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
-  }
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 30));
 
-  Future<Position?> _getLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
-
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return null;
-
-    permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
-    }
-    if (permission == LocationPermission.deniedForever) return null;
-
-    return await Geolocator.getCurrentPosition();
+    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged
+        .listen((event) {
+          // Check the state properly for newer package versions
+          if (event.connectionState == BluetoothConnectionState.disconnected) {
+            setState(() => _isConnected = false);
+            debugPrint("Disconnected. Restarting auto-scan...");
+            Future.delayed(const Duration(seconds: 2), () => _startAutoScan());
+          }
+        });
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
-      await FlutterBluePlus.stopScan();
       await device.connect();
-
       setState(() => _isConnected = true);
-      if (!mounted) return;
 
+      if (!mounted) return; // Fixed BuildContext warning
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connected! Ready for SOS.')),
+        const SnackBar(content: Text('✅ Automatically Connected to Pendant!')),
       );
 
       List<BluetoothService> services = await device.discoverServices();
@@ -169,19 +107,60 @@ class _BleScanPageState extends State<BleScanPage> {
       }
     } catch (e) {
       debugPrint('Connection failed: $e');
+      setState(() => _isConnected = false);
+      Future.delayed(const Duration(seconds: 3), () => _startAutoScan());
     }
   }
 
-  Future<void> _handleEmergency() async {
-    if (!mounted) return;
+  // --- CAREGIVER CONTACT LOGIC ---
+  Future<void> _loadCaregiverNumber() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _caregiverNumber = prefs.getString('caregiver_number');
+    });
+  }
 
-    // Safety check: Make sure a caregiver is saved
-    if (_caregiverNumber == null || _caregiverNumber!.isEmpty) {
-      _showErrorDialog(
-        "No caregiver number saved. Please select one from contacts first.",
+  Future<void> _pickContact() async {
+    try {
+      final status = await FlutterContacts.permissions.request(
+        PermissionType.read,
       );
-      return;
+      if (status != PermissionStatus.granted) return;
+
+      final contact = await FlutterContacts.native.showPicker(
+        properties: {ContactProperty.phone},
+      );
+
+      if (contact != null && contact.phones.isNotEmpty) {
+        String rawNumber = contact.phones.first.number.replaceAll(
+          RegExp(r'[^\d+]'),
+          '',
+        );
+
+        if (rawNumber.startsWith('0')) {
+          rawNumber = '+20${rawNumber.substring(1)}';
+        } else if (!rawNumber.startsWith('+')) {
+          rawNumber = '+20$rawNumber';
+        }
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('caregiver_number', rawNumber);
+
+        setState(() => _caregiverNumber = rawNumber);
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Caregiver saved: $rawNumber')));
+      }
+    } catch (e) {
+      debugPrint("Error picking contact: $e");
     }
+  }
+
+  // --- EMERGENCY LOGIC ---
+  Future<void> _handleEmergency() async {
+    if (!mounted || _caregiverNumber == null) return;
 
     showDialog(
       context: context,
@@ -203,15 +182,13 @@ class _BleScanPageState extends State<BleScanPage> {
       String lat = position?.latitude.toString() ?? "Unknown";
       String lng = position?.longitude.toString() ?? "Unknown";
       String smsBody =
-          'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
+          'SOS! Emergency button pressed. Location: Lat $lat, Lng $lng';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'to': _caregiverNumber, // <-- Uses the saved contact number!
+        'to': _caregiverNumber,
         'body': smsBody,
         'timestamp': FieldValue.serverTimestamp(),
       });
-
-      debugPrint("SOS Alert triggered Twilio SMS!");
     } catch (e) {
       debugPrint("Failed to send to Firestore: $e");
     }
@@ -220,6 +197,20 @@ class _BleScanPageState extends State<BleScanPage> {
     Navigator.pop(context);
 
     _showSosDialog(position?.latitude, position?.longitude);
+  }
+
+  Future<Position?> _getLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return null;
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return null;
+    }
+    if (permission == LocationPermission.deniedForever) return null;
+
+    return await Geolocator.getCurrentPosition();
   }
 
   void _showSosDialog(double? lat, double? lng) {
@@ -244,89 +235,48 @@ class _BleScanPageState extends State<BleScanPage> {
     );
   }
 
-  void _showErrorDialog(String msg) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Error'),
-        content: Text(msg),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('SOS Pendant App')),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                // --- NEW: Contact Picker Button ---
-                ElevatedButton.icon(
-                  onPressed: _pickContact,
-                  icon: const Icon(Icons.contact_phone),
-                  label: const Text('Select Caregiver from Contacts'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue.shade100,
-                    foregroundColor: Colors.blue.shade900,
-                  ),
-                ),
-                if (_caregiverNumber != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
-                    child: Text(
-                      "Caregiver: $_caregiverNumber",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.green,
-                      ),
-                    ),
-                  ),
-                // ----------------------------------
-                const Divider(),
-                ElevatedButton(
-                  onPressed: _startScan,
-                  child: const Text('Start Scan'),
-                ),
-                if (_isConnected)
-                  const Text(
-                    "✅ Connected to Pendant. Waiting for button press...",
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-              ],
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              _isConnected
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_searching,
+              size: 80,
+              color: _isConnected ? Colors.green : Colors.orange,
             ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: _results.length,
-              itemBuilder: (_, i) {
-                final r = _results[i];
-                return ListTile(
-                  title: Text(
-                    r.advertisementData.advName.isEmpty
-                        ? '(No Name)'
-                        : r.advertisementData.advName,
-                  ),
-                  subtitle: Text('${r.device.remoteId}  RSSI: ${r.rssi}'),
-                  trailing: const Icon(Icons.bluetooth),
-                  onTap: () => _connectToDevice(r.device),
-                );
-              },
+            const SizedBox(height: 20),
+            Text(
+              _isConnected
+                  ? "✅ Pendant Connected & Safe"
+                  : "Searching for Pendant...",
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: _isConnected ? Colors.green : Colors.orange,
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 40),
+            ElevatedButton.icon(
+              onPressed: _pickContact,
+              icon: const Icon(Icons.contact_phone),
+              label: const Text('Select Caregiver from Contacts'),
+            ),
+            if (_caregiverNumber != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10.0),
+                child: Text(
+                  "Caregiver: $_caregiverNumber",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
