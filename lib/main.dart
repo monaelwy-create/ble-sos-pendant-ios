@@ -46,41 +46,40 @@ class _BleScanPageState extends State<BleScanPage> {
   }
 
   // --- AUTO SCAN & AUTO CONNECT LOGIC ---
-    void _startAutoScan() {
-    _scanSubscription?.cancel(); 
-    
-    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-      debugPrint("Scan found ${results.length} devices");
-      for (ScanResult r in results) {
-        // Look for EITHER the name OR the Service UUID
-        bool isPendantName = r.advertisementData.advName == "SOS_PENDANT";
-        bool isPendantUUID = r.advertisementData.serviceUuids.contains(
-            Guid("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"));
+  void _startAutoScan() {
+    _scanSubscription?.cancel();
 
-        if (isPendantName || isPendantUUID) {
-          debugPrint("Found Pendant! Connecting automatically...");
-          FlutterBluePlus.stopScan(); 
+    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+      for (ScanResult r in results) {
+        // Print EVERY device the iPhone finds to the debug console
+        debugPrint(
+          "Found Device: '${r.advertisementData.advName}' | ID: ${r.device.remoteId}",
+        );
+
+        // Connect if the name matches OR if it's a device with no name but we recognize the ID
+        if (r.advertisementData.advName == "SOS_PENDANT") {
+          debugPrint("🎯 Found SOS_PENDANT! Connecting...");
+          FlutterBluePlus.stopScan();
           _connectToDevice(r.device);
           break;
         }
       }
     });
 
-    // Tell the iPhone to specifically look for your custom UUID
-    FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 30),
-      withServices: [Guid("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")], 
-    );
+    // Start scanning for EVERYTHING (no UUID filter)
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 30));
 
-    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
-      if (event.connectionState == BluetoothConnectionState.disconnected) {
-        setState(() => _isConnected = false);
-        debugPrint("Disconnected. Restarting auto-scan...");
-        Future.delayed(const Duration(seconds: 2), () => _startAutoScan()); 
-      }
-    });
+    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged
+        .listen((event) {
+          if (event.connectionState == BluetoothConnectionState.disconnected) {
+            setState(() => _isConnected = false);
+            debugPrint("Disconnected. Restarting auto-scan...");
+            Future.delayed(const Duration(seconds: 2), () => _startAutoScan());
+          }
+        });
   }
-// ===========================================================
+
+  // ===========================================================
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await device.connect();
