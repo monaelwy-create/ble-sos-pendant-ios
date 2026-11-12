@@ -46,33 +46,41 @@ class _BleScanPageState extends State<BleScanPage> {
   }
 
   // --- AUTO SCAN & AUTO CONNECT LOGIC ---
-  void _startAutoScan() {
-    _scanSubscription?.cancel(); // Cancel any existing scan listener
-
+    void _startAutoScan() {
+    _scanSubscription?.cancel(); 
+    
     _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+      debugPrint("Scan found ${results.length} devices");
       for (ScanResult r in results) {
-        if (r.advertisementData.advName == "SOS_PENDANT") {
+        // Look for EITHER the name OR the Service UUID
+        bool isPendantName = r.advertisementData.advName == "SOS_PENDANT";
+        bool isPendantUUID = r.advertisementData.serviceUuids.contains(
+            Guid("6E400001-B5A3-F393-E0A9-E50E24DCCA9E"));
+
+        if (isPendantName || isPendantUUID) {
           debugPrint("Found Pendant! Connecting automatically...");
-          FlutterBluePlus.stopScan();
+          FlutterBluePlus.stopScan(); 
           _connectToDevice(r.device);
           break;
         }
       }
     });
 
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 30));
+    // Tell the iPhone to specifically look for your custom UUID
+    FlutterBluePlus.startScan(
+      timeout: const Duration(seconds: 30),
+      withServices: [Guid("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")], 
+    );
 
-    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged
-        .listen((event) {
-          // Check the state properly for newer package versions
-          if (event.connectionState == BluetoothConnectionState.disconnected) {
-            setState(() => _isConnected = false);
-            debugPrint("Disconnected. Restarting auto-scan...");
-            Future.delayed(const Duration(seconds: 2), () => _startAutoScan());
-          }
-        });
+    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
+      if (event.connectionState == BluetoothConnectionState.disconnected) {
+        setState(() => _isConnected = false);
+        debugPrint("Disconnected. Restarting auto-scan...");
+        Future.delayed(const Duration(seconds: 2), () => _startAutoScan()); 
+      }
+    });
   }
-
+// ===========================================================
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await device.connect();
