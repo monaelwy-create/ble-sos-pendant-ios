@@ -64,5 +64,11 @@
 	<!-- Contacts Permission -->
 	<key>NSContactsUsageDescription</key>
 	<string>This app needs access to contacts so you can select a caregiver to receive SOS alerts.</string>
+	<!-- Background Modes for Bluetooth -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+
 </dict>
 </plist>
