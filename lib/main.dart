@@ -5,10 +5,14 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_contacts/flutter_contacts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_contacts/flutter_contacts.dart'; // <-- New
+import 'package:shared_preferences/shared_preferences.dart'; // <-- New
 
 import 'firebase_options.dart';
+
+const String kServiceUuid = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+const String kCharUuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+const String kPrefLastDevice = 'last_pendant_id';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,103 +27,90 @@ class BleScanPage extends StatefulWidget {
 }
 
 class _BleScanPageState extends State<BleScanPage> {
-  StreamSubscription<List<ScanResult>>? _scanSubscription;
-  StreamSubscription<dynamic>? _connectionSubscription; // Fixed type
+  List<ScanResult> _results = [];
   StreamSubscription<List<int>>? _sosSubscription;
-
+  StreamSubscription<BluetoothConnectionState>? _connSubscription;
+  StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
+  Timer? _reconnectTimer;
+  BluetoothDevice? _device;
   bool _isConnected = false;
-  String? _caregiverNumber;
+  bool _connecting = false;
+  String _status = 'Starting...';
+
+  String? _caregiverNumber; // Stores the saved number
 
   @override
   void initState() {
     super.initState();
-    _loadCaregiverNumber();
-    _startAutoScan();
+    FlutterBluePlus.onScanResults.listen((results) {
+      setState(() => _results = results);
+    });
+    _loadCaregiverNumber(); // Load saved number on startup
+
+    // Auto-connect: as soon as Bluetooth is on, reconnect to the saved pendant.
+    _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
+      if (state == BluetoothAdapterState.on) {
+        _autoConnect();
+      } else if (mounted) {
+        setState(() => _status = 'Bluetooth is ${state.name}. Turn it on.');
+      }
+    });
   }
 
   @override
   void dispose() {
-    _scanSubscription?.cancel();
-    _connectionSubscription?.cancel();
+    _reconnectTimer?.cancel();
     _sosSubscription?.cancel();
+    _connSubscription?.cancel();
+    _adapterSubscription?.cancel();
     super.dispose();
   }
 
-  // --- AUTO SCAN & AUTO CONNECT LOGIC ---
-  void _startAutoScan() {
-    _scanSubscription?.cancel();
-
-    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-      for (ScanResult r in results) {
-        // Print EVERY device the iPhone finds to the debug console
-        debugPrint(
-          "Found Device: '${r.advertisementData.advName}' | ID: ${r.device.remoteId}",
-        );
-
-        // Connect if the name matches OR if it's a device with no name but we recognize the ID
-        if (r.advertisementData.advName == "SOS_PENDANT") {
-          debugPrint("🎯 Found SOS_PENDANT! Connecting...");
-          FlutterBluePlus.stopScan();
-          _connectToDevice(r.device);
-          break;
-        }
-      }
-    });
-
-    // Start scanning for EVERYTHING (no UUID filter)
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 30));
-
-    _connectionSubscription = FlutterBluePlus.events.onConnectionStateChanged
-        .listen((event) {
-          if (event.connectionState == BluetoothConnectionState.disconnected) {
-            setState(() => _isConnected = false);
-            debugPrint("Disconnected. Restarting auto-scan...");
-            Future.delayed(const Duration(seconds: 2), () => _startAutoScan());
-          }
-        });
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
   }
 
-  // ===========================================================
-  Future<void> _connectToDevice(BluetoothDevice device) async {
-    try {
-      await device.connect();
-      setState(() => _isConnected = true);
-
-      if (!mounted) return; // Fixed BuildContext warning
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('✅ Automatically Connected to Pendant!')),
-      );
-
-      List<BluetoothService> services = await device.discoverServices();
-
-      for (var service in services) {
-        if (service.uuid.toString().toUpperCase() ==
-            "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
-          for (var characteristic in service.characteristics) {
-            if (characteristic.uuid.toString().toUpperCase() ==
-                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
-              await characteristic.setNotifyValue(true);
-
-              _sosSubscription = characteristic.onValueReceived.listen((
-                value,
-              ) async {
-                String message = String.fromCharCodes(value);
-                if (message == "SOS") {
-                  await _handleEmergency();
-                }
-              });
-            }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('Connection failed: $e');
-      setState(() => _isConnected = false);
-      Future.delayed(const Duration(seconds: 3), () => _startAutoScan());
+  // --- AUTO CONNECT ---
+  Future<void> _autoConnect() async {
+    if (_isConnected || _connecting) return;
+    final prefs = await SharedPreferences.getInstance();
+    final id = prefs.getString(kPrefLastDevice);
+    if (id == null) {
+      _setStatus('No saved pendant yet. Tap Start Scan and pick it once.');
+      return;
     }
+    _setStatus('Looking for saved pendant...');
+    _connectToDevice(BluetoothDevice.fromId(id));
   }
 
-  // --- CAREGIVER CONTACT LOGIC ---
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    final device = _device;
+    if (device == null) return;
+    _reconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (!_isConnected && !_connecting) _connectToDevice(device);
+    });
+  }
+
+  Future<void> _forgetPendant() async {
+    _reconnectTimer?.cancel();
+    final device = _device;
+    _device = null;
+    await _connSubscription?.cancel();
+    await _sosSubscription?.cancel();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(kPrefLastDevice);
+    try {
+      await device?.disconnect();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _isConnected = false;
+      _status = 'Pendant forgotten. Tap Start Scan to pick one.';
+    });
+  }
+
+  // --- CONTACT & SAVE LOGIC ---
   Future<void> _loadCaregiverNumber() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -127,33 +118,52 @@ class _BleScanPageState extends State<BleScanPage> {
     });
   }
 
+  // ================================================================
   Future<void> _pickContact() async {
     try {
+      // 1. Request permission
       final status = await FlutterContacts.permissions.request(
         PermissionType.read,
       );
-      if (status != PermissionStatus.granted) return;
 
+      if (status != PermissionStatus.granted) {
+        debugPrint("Permission denied to read contacts. Status: $status");
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Permission to access contacts was denied.'),
+          ),
+        );
+        return;
+      }
+
+      // 2. Open the native contact picker
       final contact = await FlutterContacts.native.showPicker(
         properties: {ContactProperty.phone},
       );
-
+      // **************************
       if (contact != null && contact.phones.isNotEmpty) {
+        // 1. Clean the number (remove spaces, dashes, etc.)
         String rawNumber = contact.phones.first.number.replaceAll(
           RegExp(r'[^\d+]'),
           '',
         );
 
+        // 2. Format for Egypt (if it starts with '0', replace '0' with '+20')
         if (rawNumber.startsWith('0')) {
           rawNumber = '+20${rawNumber.substring(1)}';
         } else if (!rawNumber.startsWith('+')) {
+          // If it's just digits without a 0, and no +, add +20
           rawNumber = '+20$rawNumber';
         }
 
+        // 3. Save to phone memory
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('caregiver_number', rawNumber);
 
-        setState(() => _caregiverNumber = rawNumber);
+        setState(() {
+          _caregiverNumber = rawNumber;
+        });
 
         if (!mounted) return;
         ScaffoldMessenger.of(
@@ -161,13 +171,124 @@ class _BleScanPageState extends State<BleScanPage> {
         ).showSnackBar(SnackBar(content: Text('Caregiver saved: $rawNumber')));
       }
     } catch (e) {
+      // THIS will print the exact error to your debug console if it still fails
       debugPrint("Error picking contact: $e");
     }
   }
+  // ----------------------------
 
-  // --- EMERGENCY LOGIC ---
+  Future<void> _startScan() async {
+    if (await FlutterBluePlus.isSupported == false) return;
+    if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
+      _setStatus('Bluetooth is off or not allowed. Check Settings > Bluetooth.');
+      return;
+    }
+    _setStatus('Scanning...');
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+  }
+
+  Future<Position?> _getLocation() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) return null;
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) return null;
+    }
+    if (permission == LocationPermission.deniedForever) return null;
+
+    return await Geolocator.getCurrentPosition();
+  }
+
+  Future<void> _connectToDevice(BluetoothDevice device) async {
+    if (_connecting || _isConnected) return;
+    _connecting = true;
+    _reconnectTimer?.cancel();
+    try {
+      await FlutterBluePlus.stopScan();
+      _device = device;
+      _setStatus('Connecting...');
+
+      // Watch the connection so we re-subscribe / reconnect automatically.
+      await _connSubscription?.cancel();
+      _connSubscription = device.connectionState.listen((state) async {
+        if (state == BluetoothConnectionState.connected) {
+          if (mounted) setState(() => _isConnected = true);
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(kPrefLastDevice, device.remoteId.str);
+          await _setupSos(device);
+        } else if (state == BluetoothConnectionState.disconnected) {
+          await _sosSubscription?.cancel();
+          _sosSubscription = null;
+          if (mounted) {
+            setState(() {
+              _isConnected = false;
+              _status = 'Disconnected. Reconnecting...';
+            });
+          }
+          if (!_connecting) _scheduleReconnect();
+        }
+      });
+
+      await device.connect(timeout: const Duration(seconds: 15));
+    } catch (e) {
+      // No debug console on a sideloaded app, so show the error on screen.
+      debugPrint('Connection failed: $e');
+      _setStatus('Connection failed: $e');
+      _scheduleReconnect();
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  Future<void> _setupSos(BluetoothDevice device) async {
+    try {
+      final services = await device.discoverServices();
+      var found = false;
+      for (var service in services) {
+        if (service.uuid.toString().toUpperCase() != kServiceUuid) continue;
+        for (var characteristic in service.characteristics) {
+          if (characteristic.uuid.toString().toUpperCase() != kCharUuid) {
+            continue;
+          }
+          await characteristic.setNotifyValue(true);
+          await _sosSubscription?.cancel();
+          _sosSubscription = characteristic.onValueReceived.listen((
+            value,
+          ) async {
+            final message = String.fromCharCodes(value).trim();
+            if (message == "SOS") {
+              await _handleEmergency();
+            }
+          });
+          found = true;
+        }
+      }
+      _setStatus(
+        found
+            ? 'Connected to pendant. Waiting for button press...'
+            : 'Connected, but SOS service/characteristic not found.',
+      );
+    } catch (e) {
+      debugPrint('Service setup failed: $e');
+      _setStatus('Service setup failed: $e');
+    }
+  }
+
   Future<void> _handleEmergency() async {
-    if (!mounted || _caregiverNumber == null) return;
+    if (!mounted) return;
+
+    // Safety check: Make sure a caregiver is saved
+    if (_caregiverNumber == null || _caregiverNumber!.isEmpty) {
+      _showErrorDialog(
+        "No caregiver number saved. Please select one from contacts first.",
+      );
+      return;
+    }
 
     showDialog(
       context: context,
@@ -189,13 +310,15 @@ class _BleScanPageState extends State<BleScanPage> {
       String lat = position?.latitude.toString() ?? "Unknown";
       String lng = position?.longitude.toString() ?? "Unknown";
       String smsBody =
-          'SOS! Emergency button pressed. Location: Lat $lat, Lng $lng';
+          'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'to': _caregiverNumber,
+        'to': _caregiverNumber, // <-- Uses the saved contact number!
         'body': smsBody,
         'timestamp': FieldValue.serverTimestamp(),
       });
+
+      debugPrint("SOS Alert triggered Twilio SMS!");
     } catch (e) {
       debugPrint("Failed to send to Firestore: $e");
     }
@@ -204,20 +327,6 @@ class _BleScanPageState extends State<BleScanPage> {
     Navigator.pop(context);
 
     _showSosDialog(position?.latitude, position?.longitude);
-  }
-
-  Future<Position?> _getLocation() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return null;
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
-    }
-    if (permission == LocationPermission.deniedForever) return null;
-
-    return await Geolocator.getCurrentPosition();
   }
 
   void _showSosDialog(double? lat, double? lng) {
@@ -242,48 +351,97 @@ class _BleScanPageState extends State<BleScanPage> {
     );
   }
 
+  void _showErrorDialog(String msg) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Error'),
+        content: Text(msg),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('SOS Pendant App')),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              _isConnected
-                  ? Icons.bluetooth_connected
-                  : Icons.bluetooth_searching,
-              size: 80,
-              color: _isConnected ? Colors.green : Colors.orange,
-            ),
-            const SizedBox(height: 20),
-            Text(
-              _isConnected
-                  ? "✅ Pendant Connected & Safe"
-                  : "Searching for Pendant...",
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: _isConnected ? Colors.green : Colors.orange,
-              ),
-            ),
-            const SizedBox(height: 40),
-            ElevatedButton.icon(
-              onPressed: _pickContact,
-              icon: const Icon(Icons.contact_phone),
-              label: const Text('Select Caregiver from Contacts'),
-            ),
-            if (_caregiverNumber != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 10.0),
-                child: Text(
-                  "Caregiver: $_caregiverNumber",
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                // --- NEW: Contact Picker Button ---
+                ElevatedButton.icon(
+                  onPressed: _pickContact,
+                  icon: const Icon(Icons.contact_phone),
+                  label: const Text('Select Caregiver from Contacts'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue.shade100,
+                    foregroundColor: Colors.blue.shade900,
+                  ),
                 ),
-              ),
-          ],
-        ),
+                if (_caregiverNumber != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                    child: Text(
+                      "Caregiver: $_caregiverNumber",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
+                    ),
+                  ),
+                // ----------------------------------
+                const Divider(),
+                ElevatedButton(
+                  onPressed: _startScan,
+                  child: const Text('Start Scan'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Text(
+                    _isConnected ? "✅ $_status" : _status,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: _isConnected ? Colors.green : Colors.black87,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                if (_device != null)
+                  TextButton(
+                    onPressed: _forgetPendant,
+                    child: const Text('Forget pendant'),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: _results.length,
+              itemBuilder: (_, i) {
+                final r = _results[i];
+                return ListTile(
+                  title: Text(
+                    r.advertisementData.advName.isEmpty
+                        ? '(No Name)'
+                        : r.advertisementData.advName,
+                  ),
+                  subtitle: Text('${r.device.remoteId}  RSSI: ${r.rssi}'),
+                  trailing: const Icon(Icons.bluetooth),
+                  onTap: () => _connectToDevice(r.device),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
