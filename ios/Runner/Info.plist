@@ -46,16 +46,17 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	
-	<!-- Bluetooth Permissions -->
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>This app needs Bluetooth to detect the SOS pendant.</string>
-
-		<key>UIBackgroundModes</key>
+	<!-- Background Modes for Bluetooth -->
+	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
 	</array>
+
+	<!-- Bluetooth Permissions -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app needs Bluetooth to detect the SOS pendant.</string>
 	
-		<!-- Location Permissions -->
+	<!-- Location Permissions -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>This app needs your location to send to caregivers during an SOS emergency.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
@@ -64,11 +65,5 @@
 	<!-- Contacts Permission -->
 	<key>NSContactsUsageDescription</key>
 	<string>This app needs access to contacts so you can select a caregiver to receive SOS alerts.</string>
-	<!-- Background Modes for Bluetooth -->
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>bluetooth-central</string>
-	</array>
-
 </dict>
 </plist>
