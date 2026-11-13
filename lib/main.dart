@@ -36,6 +36,7 @@ class _BleScanPageState extends State<BleScanPage> {
   BluetoothDevice? _device;
   bool _isConnected = false;
   bool _connectRequestInFlight = false;
+  String _locationNote = '';
   String _status = 'Starting...';
 
   String? _caregiverNumber; // Stores the saved number
@@ -170,9 +171,7 @@ class _BleScanPageState extends State<BleScanPage> {
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
     if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
-      _setStatus(
-        'Bluetooth is off or not allowed. Check Settings > Bluetooth.',
-      );
+      _setStatus('Bluetooth is off or not allowed. Check Settings > Bluetooth.');
       return;
     }
     _setStatus('Scanning...');
@@ -180,9 +179,13 @@ class _BleScanPageState extends State<BleScanPage> {
   }
 
   Future<Position?> _getLocation() async {
-    // Must never hang or throw: the SOS alert is sent even without a location.
+    // Never throws. Waits long enough for a cold GPS fix, then falls back.
+    _locationNote = '';
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) return null;
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        _locationNote = 'location services are off';
+        return null;
+      }
 
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -190,21 +193,37 @@ class _BleScanPageState extends State<BleScanPage> {
       }
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
+        _locationNote = 'location permission denied';
         return null;
       }
 
       final lastKnown = await Geolocator.getLastKnownPosition();
+
       try {
         return await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 6),
+            timeLimit: Duration(seconds: 12),
           ),
         );
-      } catch (_) {
-        return lastKnown; // fall back to the last fix
+      } catch (_) {}
+
+      try {
+        // Quicker, coarser fix if the precise one timed out.
+        return await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 4),
+          ),
+        );
+      } catch (_) {}
+
+      if (lastKnown == null) {
+        _locationNote = 'no GPS fix, permission: ${permission.name}';
       }
-    } catch (_) {
+      return lastKnown;
+    } catch (e) {
+      _locationNote = 'location error';
       return null;
     }
   }
@@ -329,8 +348,9 @@ class _BleScanPageState extends State<BleScanPage> {
     try {
       String lat = position?.latitude.toString() ?? "Unknown";
       String lng = position?.longitude.toString() ?? "Unknown";
-      String smsBody =
-          'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
+      String smsBody = position != null
+          ? 'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng'
+          : 'SOS! The pendant button was pressed. Location: Unknown ($_locationNote)';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
         'to': _caregiverNumber, // <-- Uses the saved contact number!
