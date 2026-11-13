@@ -16,6 +16,8 @@ const String kPrefLastDevice = 'last_pendant_id';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // iOS: lets the system relaunch the app for the pendant if it was killed.
+  FlutterBluePlus.setOptions(restoreState: true);
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const MaterialApp(home: BleScanPage()));
 }
@@ -31,10 +33,9 @@ class _BleScanPageState extends State<BleScanPage> {
   StreamSubscription<List<int>>? _sosSubscription;
   StreamSubscription<BluetoothConnectionState>? _connSubscription;
   StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
-  Timer? _reconnectTimer;
   BluetoothDevice? _device;
   bool _isConnected = false;
-  bool _connecting = false;
+  bool _connectRequestInFlight = false;
   String _status = 'Starting...';
 
   String? _caregiverNumber; // Stores the saved number
@@ -59,7 +60,6 @@ class _BleScanPageState extends State<BleScanPage> {
 
   @override
   void dispose() {
-    _reconnectTimer?.cancel();
     _sosSubscription?.cancel();
     _connSubscription?.cancel();
     _adapterSubscription?.cancel();
@@ -72,7 +72,7 @@ class _BleScanPageState extends State<BleScanPage> {
 
   // --- AUTO CONNECT ---
   Future<void> _autoConnect() async {
-    if (_isConnected || _connecting) return;
+    if (_isConnected) return;
     final prefs = await SharedPreferences.getInstance();
     final id = prefs.getString(kPrefLastDevice);
     if (id == null) {
@@ -83,17 +83,7 @@ class _BleScanPageState extends State<BleScanPage> {
     _connectToDevice(BluetoothDevice.fromId(id));
   }
 
-  void _scheduleReconnect() {
-    _reconnectTimer?.cancel();
-    final device = _device;
-    if (device == null) return;
-    _reconnectTimer = Timer(const Duration(seconds: 3), () {
-      if (!_isConnected && !_connecting) _connectToDevice(device);
-    });
-  }
-
   Future<void> _forgetPendant() async {
-    _reconnectTimer?.cancel();
     final device = _device;
     _device = null;
     await _connSubscription?.cancel();
@@ -180,7 +170,9 @@ class _BleScanPageState extends State<BleScanPage> {
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
     if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
-      _setStatus('Bluetooth is off or not allowed. Check Settings > Bluetooth.');
+      _setStatus(
+        'Bluetooth is off or not allowed. Check Settings > Bluetooth.',
+      );
       return;
     }
     _setStatus('Scanning...');
@@ -188,32 +180,51 @@ class _BleScanPageState extends State<BleScanPage> {
   }
 
   Future<Position?> _getLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+    // Must never hang or throw: the SOS alert is sent even without a location.
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) return null;
 
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return null;
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return null;
+      }
 
-    permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
+      final lastKnown = await Geolocator.getLastKnownPosition();
+      try {
+        return await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 6),
+          ),
+        );
+      } catch (_) {
+        return lastKnown; // fall back to the last fix
+      }
+    } catch (_) {
+      return null;
     }
-    if (permission == LocationPermission.deniedForever) return null;
-
-    return await Geolocator.getCurrentPosition();
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
-    if (_connecting || _isConnected) return;
-    _connecting = true;
-    _reconnectTimer?.cancel();
     try {
       await FlutterBluePlus.stopScan();
-      _device = device;
-      _setStatus('Connecting...');
 
-      // Watch the connection so we re-subscribe / reconnect automatically.
+      // Switching pendants: cancel the old pending connection.
+      final old = _device;
+      if (old != null && old.remoteId != device.remoteId) {
+        try {
+          await old.disconnect();
+        } catch (_) {}
+      }
+      _device = device;
+      _setStatus('Waiting for pendant...');
+
+      // One listener drives everything. Its first event is the current state,
+      // so it also issues the first connect request.
       await _connSubscription?.cancel();
       _connSubscription = device.connectionState.listen((state) async {
         if (state == BluetoothConnectionState.connected) {
@@ -227,21 +238,30 @@ class _BleScanPageState extends State<BleScanPage> {
           if (mounted) {
             setState(() {
               _isConnected = false;
-              _status = 'Disconnected. Reconnecting...';
+              _status = 'Disconnected. Waiting for pendant...';
             });
           }
-          if (!_connecting) _scheduleReconnect();
+          _requestConnect(device);
         }
       });
-
-      await device.connect(timeout: const Duration(seconds: 15));
     } catch (e) {
-      // No debug console on a sideloaded app, so show the error on screen.
-      debugPrint('Connection failed: $e');
-      _setStatus('Connection failed: $e');
-      _scheduleReconnect();
+      debugPrint('Connection setup failed: $e');
+      _setStatus('Connection setup failed: $e');
+    }
+  }
+
+  // autoConnect = iOS keeps this request pending natively (no timeout) and
+  // wakes the app when the pendant shows up, even if the app is suspended.
+  Future<void> _requestConnect(BluetoothDevice device) async {
+    if (_connectRequestInFlight) return;
+    _connectRequestInFlight = true;
+    try {
+      await device.connect(autoConnect: true, mtu: null);
+    } catch (e) {
+      debugPrint('Connect request failed: $e');
+      _setStatus('Connect request failed: $e');
     } finally {
-      _connecting = false;
+      _connectRequestInFlight = false;
     }
   }
 
