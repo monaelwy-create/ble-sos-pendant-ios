@@ -170,8 +170,20 @@ class _BleScanPageState extends State<BleScanPage> {
 
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
-    if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
-      _setStatus('Bluetooth is off or not allowed. Check Settings > Bluetooth.');
+    // The adapter state can still read 'unknown' for a moment after launch,
+    // so wait for 'on' instead of checking a single snapshot.
+    try {
+      await FlutterBluePlus.adapterState
+          .where((s) => s == BluetoothAdapterState.on)
+          .first
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      final st = FlutterBluePlus.adapterStateNow;
+      _setStatus(
+        st == BluetoothAdapterState.unauthorized
+            ? 'Bluetooth permission is off. Settings > this app > Bluetooth.'
+            : 'Bluetooth state: ${st.name}. Check Settings > Bluetooth.',
+      );
       return;
     }
     _setStatus('Scanning...');
