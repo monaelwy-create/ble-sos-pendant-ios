@@ -10,8 +10,14 @@ import 'package:shared_preferences/shared_preferences.dart'; // <-- New
 
 import 'firebase_options.dart';
 
+const String kServiceUuid = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+const String kCharUuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+const String kPrefLastDevice = 'last_pendant_id';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // iOS: lets the system relaunch the app for the pendant if it was killed.
+  FlutterBluePlus.setOptions(restoreState: true);
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const MaterialApp(home: BleScanPage()));
 }
@@ -25,7 +31,13 @@ class BleScanPage extends StatefulWidget {
 class _BleScanPageState extends State<BleScanPage> {
   List<ScanResult> _results = [];
   StreamSubscription<List<int>>? _sosSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connSubscription;
+  StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
+  BluetoothDevice? _device;
   bool _isConnected = false;
+  bool _connectRequestInFlight = false;
+  String _locationNote = '';
+  String _status = 'Starting...';
 
   String? _caregiverNumber; // Stores the saved number
 
@@ -36,12 +48,57 @@ class _BleScanPageState extends State<BleScanPage> {
       setState(() => _results = results);
     });
     _loadCaregiverNumber(); // Load saved number on startup
+
+    // Auto-connect: as soon as Bluetooth is on, reconnect to the saved pendant.
+    _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
+      if (state == BluetoothAdapterState.on) {
+        _autoConnect();
+      } else if (mounted) {
+        setState(() => _status = 'Bluetooth is ${state.name}. Turn it on.');
+      }
+    });
   }
 
   @override
   void dispose() {
     _sosSubscription?.cancel();
+    _connSubscription?.cancel();
+    _adapterSubscription?.cancel();
     super.dispose();
+  }
+
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
+  }
+
+  // --- AUTO CONNECT ---
+  Future<void> _autoConnect() async {
+    if (_isConnected) return;
+    final prefs = await SharedPreferences.getInstance();
+    final id = prefs.getString(kPrefLastDevice);
+    if (id == null) {
+      _setStatus('No saved pendant yet. Tap Start Scan and pick it once.');
+      return;
+    }
+    _setStatus('Looking for saved pendant...');
+    _connectToDevice(BluetoothDevice.fromId(id));
+  }
+
+  Future<void> _forgetPendant() async {
+    final device = _device;
+    _device = null;
+    await _connSubscription?.cancel();
+    await _sosSubscription?.cancel();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(kPrefLastDevice);
+    try {
+      await device?.disconnect();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _isConnected = false;
+      _status = 'Pendant forgotten. Tap Start Scan to pick one.';
+    });
   }
 
   // --- CONTACT & SAVE LOGIC ---
@@ -113,62 +170,163 @@ class _BleScanPageState extends State<BleScanPage> {
 
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
+    // The adapter state can still read 'unknown' for a moment after launch,
+    // so wait for 'on' instead of checking a single snapshot.
+    try {
+      await FlutterBluePlus.adapterState
+          .where((s) => s == BluetoothAdapterState.on)
+          .first
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      final st = FlutterBluePlus.adapterStateNow;
+      _setStatus(
+        st == BluetoothAdapterState.unauthorized
+            ? 'Bluetooth permission is off. Settings > this app > Bluetooth.'
+            : 'Bluetooth state: ${st.name}. Check Settings > Bluetooth.',
+      );
+      return;
+    }
+    _setStatus('Scanning...');
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
   }
 
   Future<Position?> _getLocation() async {
-    bool serviceEnabled;
-    LocationPermission permission;
+    // Never throws. Waits long enough for a cold GPS fix, then falls back.
+    _locationNote = '';
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        _locationNote = 'location services are off';
+        return null;
+      }
 
-    serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return null;
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        _locationNote = 'location permission denied';
+        return null;
+      }
 
-    permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
+      final lastKnown = await Geolocator.getLastKnownPosition();
+
+      try {
+        return await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 12),
+          ),
+        );
+      } catch (_) {}
+
+      try {
+        // Quicker, coarser fix if the precise one timed out.
+        return await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 4),
+          ),
+        );
+      } catch (_) {}
+
+      if (lastKnown == null) {
+        _locationNote = 'no GPS fix, permission: ${permission.name}';
+      }
+      return lastKnown;
+    } catch (e) {
+      _locationNote = 'location error';
+      return null;
     }
-    if (permission == LocationPermission.deniedForever) return null;
-
-    return await Geolocator.getCurrentPosition();
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await FlutterBluePlus.stopScan();
-      await device.connect();
 
-      setState(() => _isConnected = true);
-      if (!mounted) return;
+      // Switching pendants: cancel the old pending connection.
+      final old = _device;
+      if (old != null && old.remoteId != device.remoteId) {
+        try {
+          await old.disconnect();
+        } catch (_) {}
+      }
+      _device = device;
+      _setStatus('Waiting for pendant...');
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Connected! Ready for SOS.')),
-      );
-
-      List<BluetoothService> services = await device.discoverServices();
-
-      for (var service in services) {
-        if (service.uuid.toString().toUpperCase() ==
-            "6E400001-B5A3-F393-E0A9-E50E24DCCA9E") {
-          for (var characteristic in service.characteristics) {
-            if (characteristic.uuid.toString().toUpperCase() ==
-                "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
-              await characteristic.setNotifyValue(true);
-
-              _sosSubscription = characteristic.onValueReceived.listen((
-                value,
-              ) async {
-                String message = String.fromCharCodes(value);
-                if (message == "SOS") {
-                  await _handleEmergency();
-                }
-              });
-            }
+      // One listener drives everything. Its first event is the current state,
+      // so it also issues the first connect request.
+      await _connSubscription?.cancel();
+      _connSubscription = device.connectionState.listen((state) async {
+        if (state == BluetoothConnectionState.connected) {
+          if (mounted) setState(() => _isConnected = true);
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(kPrefLastDevice, device.remoteId.str);
+          await _setupSos(device);
+        } else if (state == BluetoothConnectionState.disconnected) {
+          await _sosSubscription?.cancel();
+          _sosSubscription = null;
+          if (mounted) {
+            setState(() {
+              _isConnected = false;
+              _status = 'Disconnected. Waiting for pendant...';
+            });
           }
+          _requestConnect(device);
+        }
+      });
+    } catch (e) {
+      debugPrint('Connection setup failed: $e');
+      _setStatus('Connection setup failed: $e');
+    }
+  }
+
+  // autoConnect = iOS keeps this request pending natively (no timeout) and
+  // wakes the app when the pendant shows up, even if the app is suspended.
+  Future<void> _requestConnect(BluetoothDevice device) async {
+    if (_connectRequestInFlight) return;
+    _connectRequestInFlight = true;
+    try {
+      await device.connect(autoConnect: true, mtu: null);
+    } catch (e) {
+      debugPrint('Connect request failed: $e');
+      _setStatus('Connect request failed: $e');
+    } finally {
+      _connectRequestInFlight = false;
+    }
+  }
+
+  Future<void> _setupSos(BluetoothDevice device) async {
+    try {
+      final services = await device.discoverServices();
+      var found = false;
+      for (var service in services) {
+        if (service.uuid.toString().toUpperCase() != kServiceUuid) continue;
+        for (var characteristic in service.characteristics) {
+          if (characteristic.uuid.toString().toUpperCase() != kCharUuid) {
+            continue;
+          }
+          await characteristic.setNotifyValue(true);
+          await _sosSubscription?.cancel();
+          _sosSubscription = characteristic.onValueReceived.listen((
+            value,
+          ) async {
+            final message = String.fromCharCodes(value).trim();
+            if (message == "SOS") {
+              await _handleEmergency();
+            }
+          });
+          found = true;
         }
       }
+      _setStatus(
+        found
+            ? 'Connected to pendant. Waiting for button press...'
+            : 'Connected, but SOS service/characteristic not found.',
+      );
     } catch (e) {
-      debugPrint('Connection failed: $e');
+      debugPrint('Service setup failed: $e');
+      _setStatus('Service setup failed: $e');
     }
   }
 
@@ -202,8 +360,9 @@ class _BleScanPageState extends State<BleScanPage> {
     try {
       String lat = position?.latitude.toString() ?? "Unknown";
       String lng = position?.longitude.toString() ?? "Unknown";
-      String smsBody =
-          'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng';
+      String smsBody = position != null
+          ? 'SOS! The pendant button was pressed. Location: Lat $lat, Lng $lng'
+          : 'SOS! The pendant button was pressed. Location: Unknown ($_locationNote)';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
         'to': _caregiverNumber, // <-- Uses the saved contact number!
@@ -297,13 +456,21 @@ class _BleScanPageState extends State<BleScanPage> {
                   onPressed: _startScan,
                   child: const Text('Start Scan'),
                 ),
-                if (_isConnected)
-                  const Text(
-                    "✅ Connected to Pendant. Waiting for button press...",
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Text(
+                    _isConnected ? "✅ $_status" : _status,
+                    textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: Colors.green,
+                      color: _isConnected ? Colors.green : Colors.black87,
                       fontWeight: FontWeight.bold,
                     ),
+                  ),
+                ),
+                if (_device != null)
+                  TextButton(
+                    onPressed: _forgetPendant,
+                    child: const Text('Forget pendant'),
                   ),
               ],
             ),
