@@ -299,27 +299,32 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
-  // --- EMERGENCY & LOCATION ---
+  // ======================================================
   Future<Position?> _getLocation() async {
     _locationNote = '';
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) {
-        _locationNote = 'location services are off';
+      // 1. Check if Location Services is globally ON
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _locationNote = 'Location Services are OFF in iPhone Settings';
         return null;
       }
 
+      // 2. Check App Permissions
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        _locationNote = 'location permission denied';
+        _locationNote = 'Permission Denied by User';
         return null;
       }
 
+      // 3. Grab Last Known (Works instantly even if GPS is asleep)
       Position? lastKnown = await Geolocator.getLastKnownPosition();
 
+      // 4. Try for a fresh, highly accurate fix
       try {
         final fresh = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
@@ -327,24 +332,28 @@ class _BleScanPageState extends State<BleScanPage> {
             timeLimit: Duration(seconds: 15),
           ),
         );
-        return fresh;
+        return fresh; // Success! Return immediately
       } catch (e) {
-        debugPrint("Fresh GPS fix failed, falling back to last known.");
+        // If it fails, we don't stop. We just log it and try the fallback.
+        _locationNote = 'Fresh GPS Timed Out. ';
       }
 
+      // 5. If fresh failed, use Last Known
       if (lastKnown != null) {
-        _locationNote = 'using last known location';
+        _locationNote += 'Used Last Known Location. ';
         return lastKnown;
       }
 
-      _locationNote = 'no location available';
+      // 6. If BOTH failed, this is the worst-case scenario
+      _locationNote += 'Last Known was also NULL. iOS is blocking location.';
       return null;
     } catch (e) {
-      _locationNote = 'location error: $e';
+      _locationNote = 'Exception: $e';
       return null;
     }
   }
 
+  // ===========================================================
   Future<void> _handleEmergency() async {
     if (!mounted) return;
 
