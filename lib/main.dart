@@ -5,8 +5,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_contacts/flutter_contacts.dart'; // <-- New
-import 'package:shared_preferences/shared_preferences.dart'; // <-- New
+import 'package:flutter_contacts/flutter_contacts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'firebase_options.dart';
 
@@ -33,23 +33,27 @@ class _BleScanPageState extends State<BleScanPage> {
   StreamSubscription<List<int>>? _sosSubscription;
   StreamSubscription<BluetoothConnectionState>? _connSubscription;
   StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
+  StreamSubscription<Position>? _positionStreamSubscription; // Background GPS
+
   BluetoothDevice? _device;
   bool _isConnected = false;
   bool _connectRequestInFlight = false;
   String _locationNote = '';
   String _status = 'Starting...';
 
-  String? _caregiverNumber; // Stores the saved number
+  String? _caregiverNumber;
 
   @override
   void initState() {
     super.initState();
+
+    _startBackgroundLocationTracking(); // Keep GPS warm
+
     FlutterBluePlus.onScanResults.listen((results) {
       setState(() => _results = results);
     });
-    _loadCaregiverNumber(); // Load saved number on startup
+    _loadCaregiverNumber();
 
-    // Auto-connect: as soon as Bluetooth is on, reconnect to the saved pendant.
     _adapterSubscription = FlutterBluePlus.adapterState.listen((state) {
       if (state == BluetoothAdapterState.on) {
         _autoConnect();
@@ -64,11 +68,41 @@ class _BleScanPageState extends State<BleScanPage> {
     _sosSubscription?.cancel();
     _connSubscription?.cancel();
     _adapterSubscription?.cancel();
+    _positionStreamSubscription?.cancel(); // Stop background GPS
     super.dispose();
   }
 
   void _setStatus(String s) {
     if (mounted) setState(() => _status = s);
+  }
+
+  // --- BACKGROUND GPS TRACKING ---
+  void _startBackgroundLocationTracking() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return;
+      }
+      if (permission == LocationPermission.deniedForever) return;
+
+      _positionStreamSubscription =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 10,
+            ),
+          ).listen((Position position) {
+            debugPrint(
+              "Background GPS warm: ${position.latitude}, ${position.longitude}",
+            );
+          });
+    } catch (e) {
+      debugPrint("Error starting background GPS: $e");
+    }
   }
 
   // --- AUTO CONNECT ---
@@ -109,10 +143,8 @@ class _BleScanPageState extends State<BleScanPage> {
     });
   }
 
-  // ================================================================
   Future<void> _pickContact() async {
     try {
-      // 1. Request permission
       final status = await FlutterContacts.permissions.request(
         PermissionType.read,
       );
@@ -128,27 +160,22 @@ class _BleScanPageState extends State<BleScanPage> {
         return;
       }
 
-      // 2. Open the native contact picker
       final contact = await FlutterContacts.native.showPicker(
         properties: {ContactProperty.phone},
       );
-      // **************************
+
       if (contact != null && contact.phones.isNotEmpty) {
-        // 1. Clean the number (remove spaces, dashes, etc.)
         String rawNumber = contact.phones.first.number.replaceAll(
           RegExp(r'[^\d+]'),
           '',
         );
 
-        // 2. Format for Egypt (if it starts with '0', replace '0' with '+20')
         if (rawNumber.startsWith('0')) {
           rawNumber = '+20${rawNumber.substring(1)}';
         } else if (!rawNumber.startsWith('+')) {
-          // If it's just digits without a 0, and no +, add +20
           rawNumber = '+20$rawNumber';
         }
 
-        // 3. Save to phone memory
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('caregiver_number', rawNumber);
 
@@ -162,21 +189,18 @@ class _BleScanPageState extends State<BleScanPage> {
         ).showSnackBar(SnackBar(content: Text('Caregiver saved: $rawNumber')));
       }
     } catch (e) {
-      // THIS will print the exact error to your debug console if it still fails
       debugPrint("Error picking contact: $e");
     }
   }
-  // ----------------------------
 
+  // --- SCANNING & CONNECTION ---
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
-    // The adapter state can still read 'unknown' for a moment after launch,
-    // so wait for 'on' instead of checking a single snapshot.
     try {
       await FlutterBluePlus.adapterState
           .where((s) => s == BluetoothAdapterState.on)
           .first
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 10));
     } catch (_) {
       final st = FlutterBluePlus.adapterStateNow;
       _setStatus(
@@ -190,61 +214,10 @@ class _BleScanPageState extends State<BleScanPage> {
     await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
   }
 
-  Future<Position?> _getLocation() async {
-    // Never throws. Waits long enough for a cold GPS fix, then falls back.
-    _locationNote = '';
-    try {
-      if (!await Geolocator.isLocationServiceEnabled()) {
-        _locationNote = 'location services are off';
-        return null;
-      }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        _locationNote = 'location permission denied';
-        return null;
-      }
-
-      final lastKnown = await Geolocator.getLastKnownPosition();
-
-      try {
-        return await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 12),
-          ),
-        );
-      } catch (_) {}
-
-      try {
-        // Quicker, coarser fix if the precise one timed out.
-        return await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.medium,
-            timeLimit: Duration(seconds: 4),
-          ),
-        );
-      } catch (_) {}
-
-      if (lastKnown == null) {
-        _locationNote = 'no GPS fix, permission: ${permission.name}';
-      }
-      return lastKnown;
-    } catch (e) {
-      _locationNote = 'location error';
-      return null;
-    }
-  }
-
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await FlutterBluePlus.stopScan();
 
-      // Switching pendants: cancel the old pending connection.
       final old = _device;
       if (old != null && old.remoteId != device.remoteId) {
         try {
@@ -254,8 +227,6 @@ class _BleScanPageState extends State<BleScanPage> {
       _device = device;
       _setStatus('Waiting for pendant...');
 
-      // One listener drives everything. Its first event is the current state,
-      // so it also issues the first connect request.
       await _connSubscription?.cancel();
       _connSubscription = device.connectionState.listen((state) async {
         if (state == BluetoothConnectionState.connected) {
@@ -281,8 +252,6 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
-  // autoConnect = iOS keeps this request pending natively (no timeout) and
-  // wakes the app when the pendant shows up, even if the app is suspended.
   Future<void> _requestConnect(BluetoothDevice device) async {
     if (_connectRequestInFlight) return;
     _connectRequestInFlight = true;
@@ -330,10 +299,55 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
+  // --- EMERGENCY & LOCATION ---
+  Future<Position?> _getLocation() async {
+    _locationNote = '';
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        _locationNote = 'location services are off';
+        return null;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        _locationNote = 'location permission denied';
+        return null;
+      }
+
+      Position? lastKnown = await Geolocator.getLastKnownPosition();
+
+      try {
+        final fresh = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 15),
+          ),
+        );
+        return fresh;
+      } catch (e) {
+        debugPrint("Fresh GPS fix failed, falling back to last known.");
+      }
+
+      if (lastKnown != null) {
+        _locationNote = 'using last known location';
+        return lastKnown;
+      }
+
+      _locationNote = 'no location available';
+      return null;
+    } catch (e) {
+      _locationNote = 'location error: $e';
+      return null;
+    }
+  }
+
   Future<void> _handleEmergency() async {
     if (!mounted) return;
 
-    // Safety check: Make sure a caregiver is saved
     if (_caregiverNumber == null || _caregiverNumber!.isEmpty) {
       _showErrorDialog(
         "No caregiver number saved. Please select one from contacts first.",
@@ -365,7 +379,7 @@ class _BleScanPageState extends State<BleScanPage> {
           : 'SOS! The pendant button was pressed. Location: Unknown ($_locationNote)';
 
       await FirebaseFirestore.instance.collection('sos_alerts').add({
-        'to': _caregiverNumber, // <-- Uses the saved contact number!
+        'to': _caregiverNumber,
         'body': smsBody,
         'timestamp': FieldValue.serverTimestamp(),
       });
@@ -381,6 +395,7 @@ class _BleScanPageState extends State<BleScanPage> {
     _showSosDialog(position?.latitude, position?.longitude);
   }
 
+  // --- UI DIALOGS ---
   void _showSosDialog(double? lat, double? lng) {
     String locationText = (lat != null && lng != null)
         ? 'Lat: $lat\nLng: $lng'
@@ -419,6 +434,7 @@ class _BleScanPageState extends State<BleScanPage> {
     );
   }
 
+  // --- BUILD UI ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -429,7 +445,6 @@ class _BleScanPageState extends State<BleScanPage> {
             padding: const EdgeInsets.all(16.0),
             child: Column(
               children: [
-                // --- NEW: Contact Picker Button ---
                 ElevatedButton.icon(
                   onPressed: _pickContact,
                   icon: const Icon(Icons.contact_phone),
@@ -450,7 +465,6 @@ class _BleScanPageState extends State<BleScanPage> {
                       ),
                     ),
                   ),
-                // ----------------------------------
                 const Divider(),
                 ElevatedButton(
                   onPressed: _startScan,
