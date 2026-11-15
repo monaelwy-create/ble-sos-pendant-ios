@@ -192,9 +192,9 @@ class _BleScanPageState extends State<BleScanPage> {
       debugPrint("Error picking contact: $e");
     }
   }
-
+// ====================================================
   // --- SCANNING & CONNECTION ---
-  Future<void> _startScan() async {
+   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
     try {
       await FlutterBluePlus.adapterState
@@ -211,9 +211,14 @@ class _BleScanPageState extends State<BleScanPage> {
       return;
     }
     _setStatus('Scanning...');
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+    
+    // FIXED: Scan specifically for the ESP32's Service UUID
+    await FlutterBluePlus.startScan(
+      timeout: const Duration(seconds: 15),
+      withServices: [Guid("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")],
+    );
   }
-
+// ============================================================
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await FlutterBluePlus.stopScan();
