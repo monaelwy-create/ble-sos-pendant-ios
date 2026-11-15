@@ -12,7 +12,10 @@ import 'firebase_options.dart';
 
 const String kServiceUuid = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 const String kCharUuid = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+const String kAckCharUuid = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 const String kPrefLastDevice = 'last_pendant_id';
+// Ignore a repeated "SOS" inside this window (the pendant repeats until it gets our ACK).
+const Duration kSosCooldown = Duration(seconds: 20);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,7 +39,10 @@ class _BleScanPageState extends State<BleScanPage> {
   StreamSubscription<Position>? _positionStreamSubscription; // Background GPS
 
   BluetoothDevice? _device;
+  BluetoothCharacteristic? _ackChar; // phone -> pendant "ACK"
   bool _isConnected = false;
+  bool _handlingEmergency = false;
+  DateTime? _lastSosAt;
   bool _connectRequestInFlight = false;
   String _locationNote = '';
   String _status = 'Starting...';
@@ -121,6 +127,7 @@ class _BleScanPageState extends State<BleScanPage> {
   Future<void> _forgetPendant() async {
     final device = _device;
     _device = null;
+    _ackChar = null;
     await _connSubscription?.cancel();
     await _sosSubscription?.cancel();
     final prefs = await SharedPreferences.getInstance();
@@ -193,7 +200,6 @@ class _BleScanPageState extends State<BleScanPage> {
     }
   }
 
-  // ====================================================
   // --- SCANNING & CONNECTION ---
   Future<void> _startScan() async {
     if (await FlutterBluePlus.isSupported == false) return;
@@ -212,15 +218,9 @@ class _BleScanPageState extends State<BleScanPage> {
       return;
     }
     _setStatus('Scanning...');
-
-    // FIXED: Scan specifically for the ESP32's Service UUID
-    await FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 15),
-      withNames: ["SOS_PENDANT"],
-    );
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
   }
 
-  // ============================================================
   Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       await FlutterBluePlus.stopScan();
@@ -244,10 +244,12 @@ class _BleScanPageState extends State<BleScanPage> {
         } else if (state == BluetoothConnectionState.disconnected) {
           await _sosSubscription?.cancel();
           _sosSubscription = null;
+          _ackChar = null;
           if (mounted) {
             setState(() {
               _isConnected = false;
-              _status = 'Disconnected. Waiting for pendant...';
+              _status =
+                  'Pendant asleep. It reconnects when the button is pressed.';
             });
           }
           _requestConnect(device);
@@ -275,34 +277,73 @@ class _BleScanPageState extends State<BleScanPage> {
   Future<void> _setupSos(BluetoothDevice device) async {
     try {
       final services = await device.discoverServices();
-      var found = false;
-      for (var service in services) {
+      BluetoothCharacteristic? sosChar;
+      BluetoothCharacteristic? ackChar;
+      for (final service in services) {
         if (service.uuid.toString().toUpperCase() != kServiceUuid) continue;
-        for (var characteristic in service.characteristics) {
-          if (characteristic.uuid.toString().toUpperCase() != kCharUuid) {
-            continue;
-          }
-          await characteristic.setNotifyValue(true);
-          await _sosSubscription?.cancel();
-          _sosSubscription = characteristic.onValueReceived.listen((
-            value,
-          ) async {
-            final message = String.fromCharCodes(value).trim();
-            if (message == "SOS") {
-              await _handleEmergency();
-            }
-          });
-          found = true;
+        for (final c in service.characteristics) {
+          final id = c.uuid.toString().toUpperCase();
+          if (id == kCharUuid) sosChar = c;
+          if (id == kAckCharUuid) ackChar = c;
         }
       }
-      _setStatus(
-        found
-            ? 'Connected to pendant. Waiting for button press...'
-            : 'Connected, but SOS service/characteristic not found.',
-      );
+      _ackChar = ackChar;
+      if (ackChar == null) {
+        debugPrint(
+          'ACK characteristic not found (old firmware or cached GATT).',
+        );
+      }
+
+      if (sosChar == null) {
+        _setStatus('Connected, but SOS service/characteristic not found.');
+        return;
+      }
+
+      // Listen BEFORE enabling notifications: a pendant that just woke from deep
+      // sleep sends "SOS" the moment it sees us subscribe.
+      await _sosSubscription?.cancel();
+      _sosSubscription = sosChar.onValueReceived.listen((value) {
+        final message = String.fromCharCodes(value).trim();
+        if (message == "SOS") {
+          _onSosFromPendant();
+        }
+      });
+      await sosChar.setNotifyValue(true);
+
+      _setStatus('Connected to pendant. Waiting for button press...');
     } catch (e) {
       debugPrint('Service setup failed: $e');
       _setStatus('Service setup failed: $e');
+    }
+  }
+
+  // Pendant told us SOS. ACK first so it can go back to sleep, then handle once.
+  Future<void> _onSosFromPendant() async {
+    await _sendAck();
+
+    final now = DateTime.now();
+    final last = _lastSosAt;
+    if (_handlingEmergency ||
+        (last != null && now.difference(last) < kSosCooldown)) {
+      debugPrint('Duplicate SOS ignored.');
+      return;
+    }
+    _lastSosAt = now;
+    _handlingEmergency = true;
+    try {
+      await _handleEmergency();
+    } finally {
+      _handlingEmergency = false;
+    }
+  }
+
+  Future<void> _sendAck() async {
+    final c = _ackChar;
+    if (c == null) return;
+    try {
+      await c.write('ACK'.codeUnits);
+    } catch (e) {
+      debugPrint('ACK write failed: $e');
     }
   }
 
